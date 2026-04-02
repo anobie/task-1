@@ -33,10 +33,15 @@ def db_session() -> Generator[Session, None, None]:
 @pytest.fixture
 def client(db_session: Session) -> Generator[TestClient, None, None]:
     def override_get_db() -> Generator[Session, None, None]:
+        request_db = TestingSessionLocal()
         try:
-            yield db_session
+            yield request_db
+            request_db.commit()
+        except Exception:
+            request_db.rollback()
+            raise
         finally:
-            pass
+            request_db.close()
 
     app.dependency_overrides[get_db] = override_get_db
     with TestClient(app) as test_client:

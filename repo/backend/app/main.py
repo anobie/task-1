@@ -6,7 +6,12 @@ from app.core.config import settings
 from app.core.database import check_db_connection
 from app.routers.admin import router as admin_router
 from app.routers.auth import router as auth_router
+from app.routers.data_quality import router as data_quality_router
+from app.routers.finance import router as finance_router
+from app.routers.integrations import router as integrations_router
+from app.routers.messaging import router as messaging_router
 from app.routers.registration import router as registration_router
+from app.routers.reviews import router as reviews_router
 
 
 def create_app() -> FastAPI:
@@ -35,6 +40,11 @@ def create_app() -> FastAPI:
     app.include_router(auth_router, prefix="/api/v1")
     app.include_router(admin_router, prefix="/api/v1")
     app.include_router(registration_router, prefix="/api/v1")
+    app.include_router(reviews_router, prefix="/api/v1")
+    app.include_router(finance_router, prefix="/api/v1")
+    app.include_router(messaging_router, prefix="/api/v1")
+    app.include_router(data_quality_router, prefix="/api/v1")
+    app.include_router(integrations_router, prefix="/api/v1")
     return app
 
 

@@ -15,8 +15,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    status_enum = sa.Enum("ENROLLED", "DROPPED", "COMPLETED", name="enrollmentstatus")
-    status_enum.create(op.get_bind(), checkfirst=True)
+    status_enum = sa.Enum("ENROLLED", "DROPPED", "COMPLETED", name="enrollmentstatus", native_enum=False)
 
     op.create_table(
         "enrollments",
@@ -80,4 +79,4 @@ def downgrade() -> None:
     op.drop_index("ix_enrollments_section_id", table_name="enrollments")
     op.drop_index("ix_enrollments_student_id", table_name="enrollments")
     op.drop_table("enrollments")
-    sa.Enum("ENROLLED", "DROPPED", "COMPLETED", name="enrollmentstatus").drop(op.get_bind(), checkfirst=True)
+    pass

@@ -1,0 +1,211 @@
+from datetime import date, datetime, timezone
+import csv
+import io
+import uuid
+
+from fastapi import HTTPException
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from app.core.config import settings
+from app.models.finance import BankStatementLine, EntryType, LedgerAccount, LedgerEntry, PaymentInstrument, ReconciliationReport
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def ensure_account(db: Session, student_id: int) -> LedgerAccount:
+    account = db.query(LedgerAccount).filter(LedgerAccount.student_id == student_id).first()
+    if account is None:
+        account = LedgerAccount(student_id=student_id)
+        db.add(account)
+        db.flush()
+    return account
+
+
+def get_balance(db: Session, student_id: int) -> float:
+    total = db.query(func.coalesce(func.sum(LedgerEntry.amount), 0.0)).filter(LedgerEntry.student_id == student_id).scalar()
+    return round(float(total or 0.0), 2)
+
+
+def record_payment(
+    db: Session,
+    student_id: int,
+    amount: float,
+    instrument: str,
+    description: str | None,
+    entry_date: date,
+) -> LedgerEntry:
+    try:
+        payment_instrument = PaymentInstrument(instrument)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid payment instrument.") from exc
+
+    account = ensure_account(db, student_id)
+    entry = LedgerEntry(
+        account_id=account.id,
+        student_id=student_id,
+        entry_type=EntryType.payment,
+        amount=-abs(amount),
+        instrument=payment_instrument,
+        description=description,
+        entry_date=entry_date,
+    )
+    db.add(entry)
+    db.commit()
+    db.refresh(entry)
+    return entry
+
+
+def record_refund(
+    db: Session,
+    student_id: int,
+    amount: float,
+    reference_entry_id: int,
+    description: str | None,
+    entry_date: date,
+) -> LedgerEntry:
+    reference = db.query(LedgerEntry).filter(LedgerEntry.id == reference_entry_id, LedgerEntry.student_id == student_id).first()
+    if reference is None:
+        raise HTTPException(status_code=404, detail="Reference ledger entry not found.")
+    if reference.entry_type != EntryType.payment:
+        raise HTTPException(status_code=422, detail="Refund reference must be a payment entry.")
+    if amount > abs(reference.amount):
+        raise HTTPException(status_code=422, detail="Refund amount cannot exceed original payment amount.")
+
+    account = ensure_account(db, student_id)
+    entry = LedgerEntry(
+        account_id=account.id,
+        student_id=student_id,
+        entry_type=EntryType.refund,
+        amount=abs(amount),
+        instrument=reference.instrument,
+        reference_entry_id=reference_entry_id,
+        description=description,
+        entry_date=entry_date,
+    )
+    db.add(entry)
+    db.commit()
+    db.refresh(entry)
+    return entry
+
+
+def get_account_summary(db: Session, student_id: int) -> tuple[float, list[LedgerEntry]]:
+    ensure_account(db, student_id)
+    entries = (
+        db.query(LedgerEntry)
+        .filter(LedgerEntry.student_id == student_id)
+        .order_by(LedgerEntry.entry_date.desc(), LedgerEntry.id.desc())
+        .all()
+    )
+    return get_balance(db, student_id), entries
+
+
+def arrears_with_late_fee(db: Session) -> list[dict]:
+    now = _utcnow().date()
+    students = db.query(LedgerEntry.student_id).distinct().all()
+    result: list[dict] = []
+    for (student_id,) in students:
+        balance = get_balance(db, student_id)
+        if balance <= 0:
+            continue
+        latest_charge = (
+            db.query(LedgerEntry)
+            .filter(LedgerEntry.student_id == student_id, LedgerEntry.entry_type.in_([EntryType.charge, EntryType.late_fee]))
+            .order_by(LedgerEntry.entry_date.desc())
+            .first()
+        )
+        if latest_charge is None:
+            overdue_days = 0
+        else:
+            overdue_days = (now - latest_charge.entry_date).days
+
+        if overdue_days > settings.grace_period_days:
+            month_start = now.replace(day=1)
+            if month_start.month == 12:
+                next_month_start = month_start.replace(year=month_start.year + 1, month=1, day=1)
+            else:
+                next_month_start = month_start.replace(month=month_start.month + 1, day=1)
+            existing_late_fee = (
+                db.query(LedgerEntry)
+                .filter(
+                    LedgerEntry.student_id == student_id,
+                    LedgerEntry.entry_type == EntryType.late_fee,
+                    LedgerEntry.entry_date >= month_start,
+                    LedgerEntry.entry_date < next_month_start,
+                )
+                .first()
+            )
+            if existing_late_fee is None:
+                account = ensure_account(db, student_id)
+                fee_amount = round(balance * settings.late_fee_rate, 2)
+                db.add(
+                    LedgerEntry(
+                        account_id=account.id,
+                        student_id=student_id,
+                        entry_type=EntryType.late_fee,
+                        amount=fee_amount,
+                        description="Monthly late fee",
+                        entry_date=now,
+                    )
+                )
+                db.commit()
+                balance = get_balance(db, student_id)
+
+        result.append({"student_id": student_id, "balance": round(balance, 2), "overdue_days": max(0, overdue_days)})
+    return result
+
+
+def import_reconciliation_csv(db: Session, csv_text: str) -> ReconciliationReport:
+    import_id = uuid.uuid4().hex
+    reader = csv.DictReader(io.StringIO(csv_text))
+    if not reader.fieldnames or not {"student_id", "amount", "statement_date"}.issubset(set(reader.fieldnames)):
+        raise HTTPException(status_code=422, detail="CSV must contain student_id, amount, statement_date columns.")
+
+    matched_total = 0.0
+    unmatched_total = 0.0
+
+    for idx, row in enumerate(reader, start=1):
+        student_id = int(row["student_id"]) if row.get("student_id") else None
+        amount = float(row["amount"])
+        statement_date = datetime.strptime(row["statement_date"], "%Y-%m-%d").date()
+        if student_id is not None:
+            match = (
+                db.query(LedgerEntry)
+                .filter(LedgerEntry.student_id == student_id, func.abs(LedgerEntry.amount) == abs(amount))
+                .first()
+            )
+        else:
+            match = None
+
+        matched = match is not None
+        if matched:
+            matched_total += abs(amount)
+        else:
+            unmatched_total += abs(amount)
+
+        db.add(
+            BankStatementLine(
+                import_id=import_id,
+                line_number=idx,
+                student_id=student_id,
+                amount=amount,
+                statement_date=statement_date,
+                raw_line=str(row),
+                matched=matched,
+            )
+        )
+
+    report = ReconciliationReport(import_id=import_id, matched_total=round(matched_total, 2), unmatched_total=round(unmatched_total, 2))
+    db.add(report)
+    db.commit()
+    db.refresh(report)
+    return report
+
+
+def get_reconciliation_report(db: Session, import_id: str) -> ReconciliationReport:
+    report = db.query(ReconciliationReport).filter(ReconciliationReport.import_id == import_id).first()
+    if report is None:
+        raise HTTPException(status_code=404, detail="Reconciliation report not found.")
+    return report

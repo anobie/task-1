@@ -16,8 +16,9 @@ depends_on = None
 
 
 def upgrade() -> None:
-    user_role_enum = sa.Enum("STUDENT", "INSTRUCTOR", "REVIEWER", "FINANCE_CLERK", "ADMIN", name="userrole")
-    user_role_enum.create(op.get_bind(), checkfirst=True)
+    user_role_enum = sa.Enum(
+        "STUDENT", "INSTRUCTOR", "REVIEWER", "FINANCE_CLERK", "ADMIN", name="userrole", native_enum=False
+    )
 
     op.create_table(
         "users",
@@ -72,6 +73,4 @@ def downgrade() -> None:
     op.drop_index("ix_users_id", table_name="users")
     op.drop_table("users")
 
-    sa.Enum("STUDENT", "INSTRUCTOR", "REVIEWER", "FINANCE_CLERK", "ADMIN", name="userrole").drop(
-        op.get_bind(), checkfirst=True
-    )
+    pass

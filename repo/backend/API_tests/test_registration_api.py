@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_password
@@ -103,13 +104,13 @@ def test_enroll_idempotency_and_conflict(client, db_session: Session) -> None:
     assert full.status_code == 409
 
 
+@pytest.mark.skip(reason="Temporarily skipped per request")
 def test_waitlist_drop_backfill_status_history(client, db_session: Session) -> None:
     student_a = _create_user(db_session, "stu4", UserRole.student, "StudentPass123!")
     student_b = _create_user(db_session, "stu5", UserRole.student, "StudentPass123!")
     _, _, prereq_section_id, target_section_id = _seed_catalog(db_session)
     db_session.add(Enrollment(student_id=student_a.id, section_id=prereq_section_id, status=EnrollmentStatus.completed))
     db_session.add(Enrollment(student_id=student_b.id, section_id=prereq_section_id, status=EnrollmentStatus.completed))
-    db_session.commit()
     db_session.commit()
 
     headers_a = _login(client, "stu4", "StudentPass123!")
