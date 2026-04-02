@@ -120,6 +120,39 @@ def quarantine_write(
     return entry
 
 
+def enforce_write_quality(
+    db: Session,
+    *,
+    entity_type: str,
+    payload: dict,
+    required_fields: list[str] | None = None,
+    ranges: dict[str, dict[str, float]] | None = None,
+    unique_keys: list[str] | None = None,
+) -> None:
+    accepted, score, reasons, fingerprint = evaluate_payload(
+        db,
+        entity_type=entity_type,
+        payload=payload,
+        required_fields=required_fields or [],
+        ranges=ranges or {},
+        unique_keys=unique_keys or [],
+    )
+    if accepted:
+        return
+    entry = quarantine_write(
+        db,
+        entity_type=entity_type,
+        payload=payload,
+        reasons=reasons,
+        quality_score=score,
+        fingerprint=fingerprint,
+    )
+    raise HTTPException(
+        status_code=422,
+        detail={"accepted": False, "quality_score": score, "reasons": reasons, "quarantine_id": entry.id},
+    )
+
+
 def list_quarantine(db: Session, status: str | None, limit: int, offset: int) -> list[QuarantineEntry]:
     query = db.query(QuarantineEntry)
     if status:

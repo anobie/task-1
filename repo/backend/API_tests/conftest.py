@@ -1,9 +1,12 @@
 from collections.abc import Generator
+import os
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
+
+os.environ.setdefault("MESSAGING_POLLER_ENABLED", "false")
 
 from app.core.database import Base, get_db
 from app.main import app

@@ -3,6 +3,9 @@ import hmac
 import os
 import re
 import secrets
+from base64 import urlsafe_b64encode
+
+from cryptography.fernet import Fernet
 
 PBKDF2_ITERATIONS = 390000
 
@@ -47,3 +50,16 @@ def validate_password_complexity(password: str) -> tuple[bool, str | None]:
     if missing:
         return False, f"Password must include at least one {', '.join(missing)}."
     return True, None
+
+
+def _fernet_from_material(key_material: str) -> Fernet:
+    digest = hashlib.sha256(key_material.encode("utf-8")).digest()
+    return Fernet(urlsafe_b64encode(digest))
+
+
+def encrypt_integration_secret(secret: str, key_material: str) -> str:
+    return _fernet_from_material(key_material).encrypt(secret.encode("utf-8")).decode("utf-8")
+
+
+def decrypt_integration_secret(ciphertext: str, key_material: str) -> str:
+    return _fernet_from_material(key_material).decrypt(ciphertext.encode("utf-8")).decode("utf-8")

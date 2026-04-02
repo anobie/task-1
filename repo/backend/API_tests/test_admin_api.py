@@ -3,6 +3,8 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_password
+from app.models.admin import AuditLog, AuditLogArchive
+from app.models.data_quality import QuarantineEntry
 from app.models.user import User, UserRole
 
 
@@ -23,6 +25,7 @@ def _auth_headers(client, username: str, password: str) -> dict[str, str]:
 
 def test_admin_crud_and_audit_log(client, db_session: Session) -> None:
     _create_user(db_session, "admin1", UserRole.admin)
+    scoped_user = _create_user(db_session, "scoped_instructor", UserRole.instructor, "InstructorPass1!")
     headers = _auth_headers(client, "admin1", "AdminPassword1!")
 
     org = client.post("/api/v1/admin/organizations", json={"name": "North Campus", "code": "NC", "is_active": True}, headers=headers)
@@ -65,6 +68,13 @@ def test_admin_crud_and_audit_log(client, db_session: Session) -> None:
         == 200
     )
 
+    scope_org = client.post(
+        "/api/v1/admin/scope-grants",
+        json={"user_id": scoped_user.id, "scope_type": "ORGANIZATION", "scope_id": org_id},
+        headers=headers,
+    )
+    assert scope_org.status_code == 200
+
     section = client.post(
         "/api/v1/admin/sections",
         json={"course_id": course_id, "term_id": term_id, "code": "A", "capacity": 30, "instructor_id": None},
@@ -81,6 +91,20 @@ def test_admin_crud_and_audit_log(client, db_session: Session) -> None:
         ).status_code
         == 200
     )
+
+    scope_section = client.post(
+        "/api/v1/admin/scope-grants",
+        json={"user_id": scoped_user.id, "scope_type": "SECTION", "scope_id": section_id},
+        headers=headers,
+    )
+    assert scope_section.status_code == 200
+
+    listed_scopes = client.get(f"/api/v1/admin/scope-grants?user_id={scoped_user.id}", headers=headers)
+    assert listed_scopes.status_code == 200
+    assert len(listed_scopes.json()) >= 2
+
+    delete_scope = client.delete(f"/api/v1/admin/scope-grants/{scope_section.json()['id']}", headers=headers)
+    assert delete_scope.status_code == 200
 
     round_response = client.post(
         "/api/v1/admin/registration-rounds",
@@ -168,3 +192,55 @@ def test_admin_user_crud(client, db_session: Session) -> None:
 
     delete = client.delete(f"/api/v1/admin/users/{user_id}", headers=headers)
     assert delete.status_code == 200
+
+
+def test_audit_retention_archive_then_purge(client, db_session: Session) -> None:
+    admin = _create_user(db_session, "admin_retention", UserRole.admin)
+    headers = _auth_headers(client, "admin_retention", "AdminPassword1!")
+
+    old_log = AuditLog(
+        actor_id=admin.id,
+        action="legacy.action",
+        entity_name="Legacy",
+        entity_id=1,
+        before_hash=None,
+        after_hash=None,
+        created_at=datetime.now(timezone.utc) - timedelta(days=365 * 8),
+        metadata_json=None,
+    )
+    db_session.add(old_log)
+    db_session.commit()
+
+    run = client.post("/api/v1/admin/audit-log/retention", headers=headers)
+    assert run.status_code == 200
+    assert run.json()["archived_count"] >= 1
+    assert run.json()["purged_count"] >= 1
+
+    db_session.expire_all()
+    archived = db_session.query(AuditLogArchive).filter(AuditLogArchive.original_audit_id == old_log.id).first()
+    assert archived is not None
+    source = db_session.query(AuditLog).filter(AuditLog.id == old_log.id, AuditLog.action == "legacy.action").first()
+    assert source is None
+
+
+def test_admin_course_write_rejected_by_data_quality(client, db_session: Session) -> None:
+    _create_user(db_session, "admin_dq", UserRole.admin)
+    headers = _auth_headers(client, "admin_dq", "AdminPassword1!")
+
+    org = client.post("/api/v1/admin/organizations", json={"name": "DQ Campus", "code": "DQC", "is_active": True}, headers=headers)
+    assert org.status_code == 200
+    org_id = org.json()["id"]
+
+    response = client.post(
+        "/api/v1/admin/courses",
+        json={"organization_id": org_id, "code": "", "title": "", "credits": 0, "prerequisites": []},
+        headers=headers,
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["accepted"] is False
+    quarantine_id = response.json()["detail"]["quarantine_id"]
+    assert quarantine_id is not None
+
+    row = db_session.query(QuarantineEntry).filter(QuarantineEntry.id == quarantine_id).first()
+    assert row is not None
+    assert row.entity_type == "AdminCourseWrite"

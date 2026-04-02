@@ -10,6 +10,7 @@ from app.models.user import User
 from app.schemas.integration import (
     IntegrationClientCreateIn,
     IntegrationClientCreateOut,
+    IntegrationClientRotateOut,
     QbankFormsImportIn,
     SISStudentsSyncIn,
 )
@@ -32,6 +33,22 @@ def create_client(payload: IntegrationClientCreateIn, db: Session = Depends(get_
     )
     db.commit()
     return IntegrationClientCreateOut(client_id=client.client_id, client_secret=raw_secret, rate_limit_rpm=client.rate_limit_rpm)
+
+
+@router.post("/clients/{client_id}/rotate-secret", response_model=IntegrationClientRotateOut)
+def rotate_client_secret(client_id: str, db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+    client, raw_secret = integration_service.rotate_client_secret(db, client_id)
+    write_audit_log(
+        db,
+        actor_id=admin.id,
+        action="integrations.client.rotate_secret",
+        entity_name="IntegrationClient",
+        entity_id=client.id,
+        before=None,
+        after={"client_id": client.client_id},
+    )
+    db.commit()
+    return IntegrationClientRotateOut(client_id=client.client_id, client_secret=raw_secret)
 
 
 def _auth_integration(request: Request, db: Session) -> None:

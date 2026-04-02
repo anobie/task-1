@@ -29,6 +29,37 @@ def get_balance(db: Session, student_id: int) -> float:
     return round(float(total or 0.0), 2)
 
 
+def _parse_instrument(instrument: str) -> PaymentInstrument:
+    try:
+        return PaymentInstrument(instrument)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid payment instrument.") from exc
+
+
+def _record_credit_entry(
+    db: Session,
+    student_id: int,
+    amount: float,
+    instrument: PaymentInstrument,
+    description: str | None,
+    entry_date: date,
+) -> LedgerEntry:
+    account = ensure_account(db, student_id)
+    entry = LedgerEntry(
+        account_id=account.id,
+        student_id=student_id,
+        entry_type=EntryType.payment,
+        amount=-abs(amount),
+        instrument=instrument,
+        description=description,
+        entry_date=entry_date,
+    )
+    db.add(entry)
+    db.flush()
+    db.refresh(entry)
+    return entry
+
+
 def record_payment(
     db: Session,
     student_id: int,
@@ -37,25 +68,34 @@ def record_payment(
     description: str | None,
     entry_date: date,
 ) -> LedgerEntry:
-    try:
-        payment_instrument = PaymentInstrument(instrument)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail="Invalid payment instrument.") from exc
+    payment_instrument = _parse_instrument(instrument)
+    return _record_credit_entry(db, student_id, amount, payment_instrument, description, entry_date)
 
-    account = ensure_account(db, student_id)
-    entry = LedgerEntry(
-        account_id=account.id,
-        student_id=student_id,
-        entry_type=EntryType.payment,
-        amount=-abs(amount),
-        instrument=payment_instrument,
-        description=description,
-        entry_date=entry_date,
-    )
-    db.add(entry)
-    db.commit()
-    db.refresh(entry)
-    return entry
+
+def record_prepayment(
+    db: Session,
+    student_id: int,
+    amount: float,
+    instrument: str,
+    description: str | None,
+    entry_date: date,
+) -> LedgerEntry:
+    payment_instrument = _parse_instrument(instrument)
+    note = description or "Prepayment"
+    return _record_credit_entry(db, student_id, amount, payment_instrument, note, entry_date)
+
+
+def record_deposit(
+    db: Session,
+    student_id: int,
+    amount: float,
+    instrument: str,
+    description: str | None,
+    entry_date: date,
+) -> LedgerEntry:
+    payment_instrument = _parse_instrument(instrument)
+    note = description or "Deposit"
+    return _record_credit_entry(db, student_id, amount, payment_instrument, note, entry_date)
 
 
 def record_refund(
@@ -86,7 +126,30 @@ def record_refund(
         entry_date=entry_date,
     )
     db.add(entry)
-    db.commit()
+    db.flush()
+    db.refresh(entry)
+    return entry
+
+
+def record_month_end_billing(
+    db: Session,
+    student_id: int,
+    amount: float,
+    description: str | None,
+    entry_date: date,
+) -> LedgerEntry:
+    account = ensure_account(db, student_id)
+    entry = LedgerEntry(
+        account_id=account.id,
+        student_id=student_id,
+        entry_type=EntryType.charge,
+        amount=abs(amount),
+        instrument=None,
+        description=description or "Month-end billing",
+        entry_date=entry_date,
+    )
+    db.add(entry)
+    db.flush()
     db.refresh(entry)
     return entry
 
@@ -102,10 +165,11 @@ def get_account_summary(db: Session, student_id: int) -> tuple[float, list[Ledge
     return get_balance(db, student_id), entries
 
 
-def arrears_with_late_fee(db: Session) -> list[dict]:
+def arrears_with_late_fee(db: Session) -> tuple[list[dict], int]:
     now = _utcnow().date()
     students = db.query(LedgerEntry.student_id).distinct().all()
     result: list[dict] = []
+    generated_late_fees = 0
     for (student_id,) in students:
         balance = get_balance(db, student_id)
         if balance <= 0:
@@ -150,11 +214,12 @@ def arrears_with_late_fee(db: Session) -> list[dict]:
                         entry_date=now,
                     )
                 )
-                db.commit()
+                db.flush()
                 balance = get_balance(db, student_id)
+                generated_late_fees += 1
 
         result.append({"student_id": student_id, "balance": round(balance, 2), "overdue_days": max(0, overdue_days)})
-    return result
+    return result, generated_late_fees
 
 
 def import_reconciliation_csv(db: Session, csv_text: str) -> ReconciliationReport:
@@ -199,7 +264,7 @@ def import_reconciliation_csv(db: Session, csv_text: str) -> ReconciliationRepor
 
     report = ReconciliationReport(import_id=import_id, matched_total=round(matched_total, 2), unmatched_total=round(unmatched_total, 2))
     db.add(report)
-    db.commit()
+    db.flush()
     db.refresh(report)
     return report
 

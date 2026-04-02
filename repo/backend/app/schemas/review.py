@@ -41,6 +41,7 @@ class AssignmentOut(BaseModel):
     round_id: int
     reviewer_id: int
     student_id: int | None
+    student_ref: str | None = None
     section_id: int
     assigned_manually: bool
 

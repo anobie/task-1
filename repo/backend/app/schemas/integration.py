@@ -12,6 +12,11 @@ class IntegrationClientCreateOut(BaseModel):
     rate_limit_rpm: int
 
 
+class IntegrationClientRotateOut(BaseModel):
+    client_id: str
+    client_secret: str
+
+
 class SISStudentsSyncIn(BaseModel):
     students: list[dict]
 

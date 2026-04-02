@@ -72,7 +72,7 @@ export function AppShell({
     <Box sx={{ display: "flex", minHeight: "100vh" }}>
       <AppBar position="fixed" sx={{ ml: { md: `${drawerWidth}px` }, width: { md: `calc(100% - ${drawerWidth}px)` } }}>
         <Toolbar>
-          <IconButton color="inherit" edge="start" onClick={() => setMobileOpen((prev) => !prev)} sx={{ mr: 2, display: { md: "none" } }}>
+          <IconButton aria-label="open navigation" color="inherit" edge="start" onClick={() => setMobileOpen((prev) => !prev)} sx={{ mr: 2, display: { md: "none" } }}>
             <MenuIcon />
           </IconButton>
           <Box sx={{ flexGrow: 1 }}>
@@ -82,12 +82,12 @@ export function AppShell({
             </Typography>
           </Box>
           <Stack direction="row" spacing={0.5}>
-            <IconButton color="inherit" onClick={onNotificationsClick}>
+            <IconButton aria-label="open notifications" color="inherit" onClick={onNotificationsClick}>
               <Badge badgeContent={unreadCount} color="secondary">
                 <NotificationsIcon />
               </Badge>
             </IconButton>
-            <IconButton color="inherit" onClick={onLogout}>
+            <IconButton aria-label="logout" color="inherit" onClick={onLogout}>
               <LogoutIcon />
             </IconButton>
           </Stack>

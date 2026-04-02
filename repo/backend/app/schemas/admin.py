@@ -95,3 +95,23 @@ class AuditLogOut(BaseModel):
     before_hash: str | None
     after_hash: str | None
     created_at: datetime
+
+
+class ScopeGrantIn(BaseModel):
+    user_id: int
+    scope_type: str
+    scope_id: int
+
+
+class ScopeGrantOut(BaseModel):
+    id: int
+    user_id: int
+    scope_type: str
+    scope_id: int
+    created_at: datetime
+
+
+class AuditRetentionRunOut(BaseModel):
+    archived_count: int
+    purged_count: int
+    cutoff_iso: str

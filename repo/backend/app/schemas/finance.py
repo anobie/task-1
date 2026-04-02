@@ -19,6 +19,29 @@ class RefundIn(BaseModel):
     entry_date: date
 
 
+class PrepaymentIn(BaseModel):
+    student_id: int
+    amount: float = Field(gt=0)
+    instrument: str
+    description: str | None = None
+    entry_date: date
+
+
+class DepositIn(BaseModel):
+    student_id: int
+    amount: float = Field(gt=0)
+    instrument: str
+    description: str | None = None
+    entry_date: date
+
+
+class MonthEndBillingIn(BaseModel):
+    student_id: int
+    amount: float = Field(gt=0)
+    description: str | None = None
+    entry_date: date
+
+
 class LedgerEntryOut(BaseModel):
     id: int
     entry_type: str

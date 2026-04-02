@@ -1,12 +1,15 @@
 from datetime import datetime, timezone
 import csv
+import hashlib
 import io
 from statistics import median
 
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.admin import Section
+from app.models.registration import Enrollment, EnrollmentStatus
 from app.models.review import (
     IdentityMode,
     OutlierFlag,
@@ -44,6 +47,17 @@ def _check_coi(db: Session, round_obj: ReviewRound, reviewer_id: int, student_id
         raise HTTPException(status_code=409, detail="Conflict of interest: reporting line conflict.")
     if reviewer_id == student_id:
         raise HTTPException(status_code=409, detail="Conflict of interest: self review is not allowed.")
+    same_section_enrollment = (
+        db.query(Enrollment.id)
+        .filter(
+            Enrollment.section_id == round_obj.section_id,
+            Enrollment.student_id.in_([reviewer_id, student_id]),
+            Enrollment.status.in_([EnrollmentStatus.enrolled, EnrollmentStatus.completed]),
+        )
+        .count()
+    )
+    if same_section_enrollment >= 2:
+        raise HTTPException(status_code=409, detail="Conflict of interest: reviewer and student are in the same section.")
 
 
 def _calculate_total_score(form: ScoringForm, criterion_scores: dict[str, float]) -> float:
@@ -100,16 +114,20 @@ def _evaluate_outliers(db: Session, round_id: int, student_id: int) -> None:
 
 def mask_assignment_for_view(mode: IdentityMode, assignment: ReviewerAssignment, requester: User) -> dict:
     student_id = assignment.student_id
+    student_ref = None
     if requester.role == UserRole.reviewer:
         if mode == IdentityMode.blind:
             student_id = None
         elif mode == IdentityMode.semi_blind:
             student_id = None
+            canonical = f"{assignment.round_id}:{assignment.student_id}:{settings.secret_key}"
+            student_ref = f"SR-{hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:8].upper()}"
     return {
         "id": assignment.id,
         "round_id": assignment.round_id,
         "reviewer_id": assignment.reviewer_id,
         "student_id": student_id,
+        "student_ref": student_ref,
         "section_id": assignment.section_id,
         "assigned_manually": assignment.assigned_manually,
     }

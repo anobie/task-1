@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 
@@ -6,13 +6,21 @@ from fastapi import HTTPException, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.core.authz import require_section_access
 from app.models.admin import Course, RegistrationRound, Section, Term
 from app.models.registration import AddDropRequest, Enrollment, EnrollmentStatus, RegistrationHistory, WaitlistEntry
-from app.models.user import User
+from app.models.user import User, UserRole
+
+IDEMPOTENCY_WINDOW_HOURS = 24
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _require_student_role(student: User) -> None:
+    if student.role != UserRole.student:
+        raise HTTPException(status_code=403, detail="Student access required.")
 
 
 def _request_hash(payload: dict) -> str:
@@ -22,6 +30,32 @@ def _request_hash(payload: dict) -> str:
 
 def _record_history(db: Session, student_id: int, section_id: int, event_type: str, details: str | None = None) -> None:
     db.add(RegistrationHistory(student_id=student_id, section_id=section_id, event_type=event_type, details=details))
+
+
+def _to_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _purge_expired_idempotency_key(db: Session, actor_id: int, operation: str, idempotency_key: str) -> None:
+    cutoff = _utcnow() - timedelta(hours=IDEMPOTENCY_WINDOW_HOURS)
+    rows = (
+        db.query(AddDropRequest)
+        .filter(
+            AddDropRequest.actor_id == actor_id,
+            AddDropRequest.operation == operation,
+            AddDropRequest.idempotency_key == idempotency_key,
+        )
+        .all()
+    )
+    deleted_any = False
+    for row in rows:
+        if _to_utc(row.created_at) < cutoff:
+            db.delete(row)
+            deleted_any = True
+    if deleted_any:
+        db.flush()
 
 
 def active_round_for_term(db: Session, term_id: int) -> RegistrationRound | None:
@@ -36,6 +70,7 @@ def active_round_for_term(db: Session, term_id: int) -> RegistrationRound | None
 
 
 def check_eligibility(db: Session, student: User, course_id: int, section_id: int) -> list[str]:
+    require_section_access(db, student, section_id)
     reasons: list[str] = []
     course = db.query(Course).filter(Course.id == course_id).first()
     section = db.query(Section).filter(Section.id == section_id, Section.course_id == course_id).first()
@@ -94,8 +129,11 @@ def _consume_waitlist_if_seat_available(db: Session, section_id: int) -> None:
 
 
 def enroll(db: Session, student: User, section_id: int, idempotency_key: str) -> tuple[int, dict]:
+    _require_student_role(student)
+    require_section_access(db, student, section_id)
     payload = {"section_id": section_id}
     hash_value = _request_hash(payload)
+    _purge_expired_idempotency_key(db, student.id, "ENROLL", idempotency_key)
     existing_request = (
         db.query(AddDropRequest)
         .filter(AddDropRequest.actor_id == student.id, AddDropRequest.operation == "ENROLL", AddDropRequest.idempotency_key == idempotency_key)
@@ -144,6 +182,8 @@ def enroll(db: Session, student: User, section_id: int, idempotency_key: str) ->
 
 
 def join_waitlist(db: Session, student: User, section_id: int) -> dict:
+    _require_student_role(student)
+    require_section_access(db, student, section_id)
     section = db.query(Section).filter(Section.id == section_id).first()
     if section is None:
         raise HTTPException(status_code=404, detail="Section not found.")
@@ -159,8 +199,11 @@ def join_waitlist(db: Session, student: User, section_id: int) -> dict:
 
 
 def drop(db: Session, student: User, section_id: int, idempotency_key: str) -> tuple[int, dict]:
+    _require_student_role(student)
+    require_section_access(db, student, section_id)
     payload = {"section_id": section_id}
     hash_value = _request_hash(payload)
+    _purge_expired_idempotency_key(db, student.id, "DROP", idempotency_key)
     existing_request = (
         db.query(AddDropRequest)
         .filter(AddDropRequest.actor_id == student.id, AddDropRequest.operation == "DROP", AddDropRequest.idempotency_key == idempotency_key)

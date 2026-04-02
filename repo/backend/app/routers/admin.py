@@ -5,9 +5,11 @@ from app.core.audit import write_audit_log
 from app.core.auth import require_admin
 from app.core.database import get_db
 from app.core.security import hash_password, validate_password_complexity
+from app.models.access import ScopeGrant, ScopeType
 from app.models.admin import AuditLog, Course, Organization, RegistrationRound, Section, Term
 from app.models.user import SessionToken, User, UserRole
 from app.schemas.admin import (
+    AuditRetentionRunOut,
     AuditLogOut,
     CourseIn,
     CourseOut,
@@ -17,12 +19,15 @@ from app.schemas.admin import (
     RegistrationRoundOut,
     SectionIn,
     SectionOut,
+    ScopeGrantIn,
+    ScopeGrantOut,
     TermIn,
     TermOut,
     UserCreateIn,
     UserOut,
     UserUpdateIn,
 )
+from app.services import audit_retention_service, data_quality_service
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -36,6 +41,42 @@ def _parse_role(role_value: str) -> UserRole:
         return UserRole(role_value)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid role.") from exc
+
+
+def _parse_scope_type(scope_type_value: str) -> ScopeType:
+    try:
+        return ScopeType(scope_type_value)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid scope type.") from exc
+
+
+def _enforce_admin_write_quality(entity_type: str, payload: dict, db: Session) -> None:
+    rules: dict[str, dict] = {
+        "AdminCourseWrite": {
+            "required_fields": ["organization_id", "code", "title", "credits"],
+            "ranges": {"credits": {"min": 1, "max": 12}},
+            "unique_keys": ["code", "title"],
+        },
+        "AdminSectionWrite": {
+            "required_fields": ["course_id", "term_id", "code", "capacity"],
+            "ranges": {"capacity": {"min": 1, "max": 5000}},
+            "unique_keys": ["code"],
+        },
+        "AdminUserWrite": {
+            "required_fields": ["username", "role"],
+            "ranges": {},
+            "unique_keys": ["username"],
+        },
+    }
+    spec = rules[entity_type]
+    data_quality_service.enforce_write_quality(
+        db,
+        entity_type=entity_type,
+        payload=payload,
+        required_fields=spec["required_fields"],
+        ranges=spec["ranges"],
+        unique_keys=spec["unique_keys"],
+    )
 
 
 @router.post("/organizations", response_model=OrganizationOut)
@@ -156,6 +197,7 @@ def delete_term(term_id: int, db: Session = Depends(get_db), admin: User = Depen
 
 @router.post("/courses", response_model=CourseOut)
 def create_course(payload: CourseIn, db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+    _enforce_admin_write_quality("AdminCourseWrite", payload.model_dump(), db)
     entity = Course(**payload.model_dump())
     db.add(entity)
     db.flush()
@@ -175,6 +217,7 @@ def update_course(course_id: int, payload: CourseIn, db: Session = Depends(get_d
     entity = db.query(Course).filter(Course.id == course_id).first()
     if entity is None:
         raise HTTPException(status_code=404, detail="Course not found.")
+    _enforce_admin_write_quality("AdminCourseWrite", payload.model_dump(), db)
     before = _to_dict(entity, ["id", "organization_id", "code", "title", "credits", "prerequisites"])
     for key, value in payload.model_dump().items():
         setattr(entity, key, value)
@@ -199,6 +242,7 @@ def delete_course(course_id: int, db: Session = Depends(get_db), admin: User = D
 
 @router.post("/sections", response_model=SectionOut)
 def create_section(payload: SectionIn, db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+    _enforce_admin_write_quality("AdminSectionWrite", payload.model_dump(), db)
     entity = Section(**payload.model_dump())
     db.add(entity)
     db.flush()
@@ -218,6 +262,7 @@ def update_section(section_id: int, payload: SectionIn, db: Session = Depends(ge
     entity = db.query(Section).filter(Section.id == section_id).first()
     if entity is None:
         raise HTTPException(status_code=404, detail="Section not found.")
+    _enforce_admin_write_quality("AdminSectionWrite", payload.model_dump(), db)
     before = _to_dict(entity, ["id", "course_id", "term_id", "code", "instructor_id", "capacity"])
     for key, value in payload.model_dump().items():
         setattr(entity, key, value)
@@ -294,6 +339,11 @@ def create_user(payload: UserCreateIn, db: Session = Depends(get_db), admin: Use
     if not valid:
         raise HTTPException(status_code=422, detail=reason)
     role = _parse_role(payload.role)
+    _enforce_admin_write_quality(
+        "AdminUserWrite",
+        {"username": payload.username, "role": role.value, "org_id": payload.org_id, "reports_to": payload.reports_to},
+        db,
+    )
     user = User(
         username=payload.username,
         password_hash=hash_password(payload.password),
@@ -354,6 +404,13 @@ def update_user(user_id: int, payload: UserUpdateIn, db: Session = Depends(get_d
     data = payload.model_dump(exclude_unset=True)
     if "role" in data and data["role"] is not None:
         user.role = _parse_role(data.pop("role"))
+    dq_payload = {
+        "username": user.username,
+        "role": user.role.value,
+        "org_id": data.get("org_id", user.org_id),
+        "reports_to": data.get("reports_to", user.reports_to),
+    }
+    _enforce_admin_write_quality("AdminUserWrite", dq_payload, db)
     for key, value in data.items():
         setattr(user, key, value)
     if payload.is_active is False:
@@ -405,3 +462,117 @@ def get_audit_logs(
         )
         for row in rows
     ]
+
+
+@router.post("/audit-log/retention", response_model=AuditRetentionRunOut)
+def run_audit_log_retention(db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+    archived_count, purged_count, cutoff = audit_retention_service.run_archive_and_purge(db)
+    write_audit_log(
+        db,
+        actor_id=admin.id,
+        action="audit.retention.run",
+        entity_name="AuditLog",
+        entity_id=None,
+        before=None,
+        after={"archived_count": archived_count, "purged_count": purged_count, "cutoff_iso": cutoff.isoformat()},
+    )
+    db.commit()
+    return AuditRetentionRunOut(archived_count=archived_count, purged_count=purged_count, cutoff_iso=cutoff.isoformat())
+
+
+@router.post("/scope-grants", response_model=ScopeGrantOut)
+def create_scope_grant(payload: ScopeGrantIn, db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+    scope_type = _parse_scope_type(payload.scope_type)
+    user = db.query(User).filter(User.id == payload.user_id).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    if scope_type == ScopeType.organization:
+        exists_scope = db.query(Organization.id).filter(Organization.id == payload.scope_id).first()
+    else:
+        exists_scope = db.query(Section.id).filter(Section.id == payload.scope_id).first()
+    if exists_scope is None:
+        raise HTTPException(status_code=404, detail="Scope target not found.")
+
+    grant = (
+        db.query(ScopeGrant)
+        .filter(
+            ScopeGrant.user_id == payload.user_id,
+            ScopeGrant.scope_type == scope_type,
+            ScopeGrant.scope_id == payload.scope_id,
+        )
+        .first()
+    )
+    if grant is None:
+        grant = ScopeGrant(user_id=payload.user_id, scope_type=scope_type, scope_id=payload.scope_id)
+        db.add(grant)
+        db.flush()
+        write_audit_log(
+            db,
+            actor_id=admin.id,
+            action="scope_grant.create",
+            entity_name="ScopeGrant",
+            entity_id=grant.id,
+            before=None,
+            after={"id": grant.id, "user_id": grant.user_id, "scope_type": grant.scope_type.value, "scope_id": grant.scope_id},
+        )
+        db.commit()
+
+    return ScopeGrantOut(
+        id=grant.id,
+        user_id=grant.user_id,
+        scope_type=grant.scope_type.value,
+        scope_id=grant.scope_id,
+        created_at=grant.created_at,
+    )
+
+
+@router.get("/scope-grants", response_model=list[ScopeGrantOut])
+def list_scope_grants(
+    user_id: int | None = Query(default=None),
+    scope_type: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    query = db.query(ScopeGrant)
+    if user_id is not None:
+        query = query.filter(ScopeGrant.user_id == user_id)
+    if scope_type is not None:
+        query = query.filter(ScopeGrant.scope_type == _parse_scope_type(scope_type))
+    rows = query.order_by(ScopeGrant.id.asc()).all()
+    return [
+        ScopeGrantOut(
+            id=row.id,
+            user_id=row.user_id,
+            scope_type=row.scope_type.value,
+            scope_id=row.scope_id,
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]
+
+
+@router.delete("/scope-grants/{grant_id}")
+def delete_scope_grant(grant_id: int, db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+    grant = db.query(ScopeGrant).filter(ScopeGrant.id == grant_id).first()
+    if grant is None:
+        raise HTTPException(status_code=404, detail="Scope grant not found.")
+
+    before = {
+        "id": grant.id,
+        "user_id": grant.user_id,
+        "scope_type": grant.scope_type.value,
+        "scope_id": grant.scope_id,
+    }
+    db.delete(grant)
+    write_audit_log(
+        db,
+        actor_id=admin.id,
+        action="scope_grant.delete",
+        entity_name="ScopeGrant",
+        entity_id=grant_id,
+        before=before,
+        after=None,
+    )
+    db.commit()
+    return {"message": "Deleted."}

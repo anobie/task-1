@@ -12,7 +12,7 @@ class IntegrationClient(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     client_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
-    secret_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    secret_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
     secret_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     rate_limit_rpm: Mapped[int] = mapped_column(Integer, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

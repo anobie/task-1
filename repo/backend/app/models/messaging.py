@@ -15,6 +15,22 @@ class NotificationTrigger(str, enum.Enum):
     grading_completed = "GRADING_COMPLETED"
 
 
+class NotificationScheduleStatus(str, enum.Enum):
+    pending = "PENDING"
+    dispatched = "DISPATCHED"
+    cancelled = "CANCELLED"
+
+
+class NotificationTriggerConfig(Base):
+    __tablename__ = "notification_trigger_configs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    trigger_type: Mapped[NotificationTrigger] = mapped_column(Enum(NotificationTrigger), nullable=False, unique=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    lead_hours: Mapped[int] = mapped_column(Integer, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
 class Notification(Base):
     __tablename__ = "notifications"
 
@@ -38,3 +54,18 @@ class NotificationLog(Base):
     event_type: Mapped[str] = mapped_column(String(30), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     details: Mapped[str] = mapped_column(Text, nullable=True)
+
+
+class NotificationSchedule(Base):
+    __tablename__ = "notification_schedules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    recipient_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    trigger_type: Mapped[NotificationTrigger] = mapped_column(Enum(NotificationTrigger), nullable=False)
+    status: Mapped[NotificationScheduleStatus] = mapped_column(Enum(NotificationScheduleStatus), nullable=False, default=NotificationScheduleStatus.pending)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_json: Mapped[str] = mapped_column(Text, nullable=True)
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    dispatched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

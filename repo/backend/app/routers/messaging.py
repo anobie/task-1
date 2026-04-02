@@ -5,7 +5,14 @@ from app.core.audit import write_audit_log
 from app.core.auth import get_current_user
 from app.core.database import get_db
 from app.models.user import User, UserRole
-from app.schemas.messaging import NotificationListOut, NotificationOut, TriggerDispatchIn
+from app.schemas.messaging import (
+    NotificationListOut,
+    NotificationOut,
+    ProcessDueOut,
+    TriggerConfigOut,
+    TriggerConfigUpdateIn,
+    TriggerDispatchIn,
+)
 from app.services import messaging_service
 
 router = APIRouter(prefix="/messaging", tags=["messaging"])
@@ -13,6 +20,10 @@ router = APIRouter(prefix="/messaging", tags=["messaging"])
 
 def _can_dispatch(user: User) -> bool:
     return user.role in {UserRole.admin, UserRole.instructor, UserRole.finance_clerk}
+
+
+def _can_manage_triggers(user: User) -> bool:
+    return user.role == UserRole.admin
 
 
 @router.post("/dispatch")
@@ -39,6 +50,54 @@ def dispatch(payload: TriggerDispatchIn, db: Session = Depends(get_db), user: Us
     )
     db.commit()
     return result
+
+
+@router.get("/triggers", response_model=list[TriggerConfigOut])
+def list_triggers(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    if not _can_manage_triggers(user):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    rows = messaging_service.list_trigger_configs(db)
+    return [
+        TriggerConfigOut(trigger_type=row.trigger_type.value, enabled=row.enabled, lead_hours=row.lead_hours)
+        for row in rows
+    ]
+
+
+@router.put("/triggers/{trigger_type}", response_model=TriggerConfigOut)
+def update_trigger(
+    trigger_type: str,
+    payload: TriggerConfigUpdateIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if not _can_manage_triggers(user):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    row = messaging_service.update_trigger_config(
+        db,
+        trigger_type,
+        enabled=payload.enabled,
+        lead_hours=payload.lead_hours,
+    )
+    write_audit_log(
+        db,
+        actor_id=user.id,
+        action="messaging.trigger.update",
+        entity_name="NotificationTriggerConfig",
+        entity_id=row.id,
+        before=None,
+        after={"trigger_type": row.trigger_type.value, "enabled": row.enabled, "lead_hours": row.lead_hours},
+    )
+    db.commit()
+    return TriggerConfigOut(trigger_type=row.trigger_type.value, enabled=row.enabled, lead_hours=row.lead_hours)
+
+
+@router.post("/triggers/process-due", response_model=ProcessDueOut)
+def process_due(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    if not _can_manage_triggers(user):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    processed = messaging_service.process_due_schedules(db)
+    db.commit()
+    return ProcessDueOut(processed=processed)
 
 
 @router.get("/notifications", response_model=NotificationListOut)

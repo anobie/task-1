@@ -6,10 +6,12 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.logging import get_logger
 from app.core.security import token_hash
 from app.models.user import SessionToken, User, UserRole
 
 bearer_scheme = HTTPBearer(auto_error=False)
+logger = get_logger("app.auth")
 
 
 def _utcnow() -> datetime:
@@ -21,10 +23,12 @@ def get_current_session(
     db: Session = Depends(get_db),
 ) -> SessionToken:
     if credentials is None:
+        logger.info("missing_auth_credentials", extra={"event": "auth.session.missing_credentials"})
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
 
     session = db.query(SessionToken).filter(SessionToken.token_hash == token_hash(credentials.credentials)).first()
     if session is None or session.revoked:
+        logger.info("invalid_or_revoked_session", extra={"event": "auth.session.invalid_or_revoked"})
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session.")
 
     now = _utcnow()
@@ -40,6 +44,10 @@ def get_current_session(
         session.revoked = True
         session.revoked_at = now
         db.commit()
+        logger.info(
+            "session_expired_absolute",
+            extra={"event": "auth.session.expired_absolute", "fields": {"session_id": session.id, "user_id": session.user_id}},
+        )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired.")
 
     idle_delta = timedelta(seconds=settings.session_idle_timeout)
@@ -47,6 +55,10 @@ def get_current_session(
         session.revoked = True
         session.revoked_at = now
         db.commit()
+        logger.info(
+            "session_expired_idle",
+            extra={"event": "auth.session.expired_idle", "fields": {"session_id": session.id, "user_id": session.user_id}},
+        )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired.")
 
     session.last_active_at = now
@@ -57,7 +69,11 @@ def get_current_session(
 
 def get_current_user(current_session: SessionToken = Depends(get_current_session)) -> User:
     user = current_session.user
+    if user is None:
+        logger.info("invalid_session_user", extra={"event": "auth.session.invalid_user", "fields": {"session_id": current_session.id}})
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session user.")
     if not user.is_active:
+        logger.info("inactive_account", extra={"event": "auth.user.inactive", "fields": {"user_id": user.id}})
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is inactive.")
     return user
 

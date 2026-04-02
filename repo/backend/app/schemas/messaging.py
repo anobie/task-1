@@ -24,3 +24,18 @@ class NotificationOut(BaseModel):
 class NotificationListOut(BaseModel):
     unread_count: int
     notifications: list[NotificationOut]
+
+
+class TriggerConfigOut(BaseModel):
+    trigger_type: str
+    enabled: bool
+    lead_hours: int | None
+
+
+class TriggerConfigUpdateIn(BaseModel):
+    enabled: bool
+    lead_hours: int | None = Field(default=None, ge=1, le=168)
+
+
+class ProcessDueOut(BaseModel):
+    processed: int

@@ -6,6 +6,7 @@ import json
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_password
+from app.models.integration import IntegrationClient
 from app.models.user import User, UserRole
 
 
@@ -38,6 +39,10 @@ def test_client_registration_and_hmac_flows(client, db_session: Session) -> None
     client_id = create.json()["client_id"]
     secret = create.json()["client_secret"]
 
+    stored_client = db_session.query(IntegrationClient).filter(IntegrationClient.client_id == client_id).first()
+    assert stored_client is not None
+    assert secret not in stored_client.secret_ciphertext
+
     path = "/api/v1/integrations/sis/students"
     payload = {"students": [{"id": "S1"}, {"id": "S2"}]}
     body = json.dumps(payload).encode("utf-8")
@@ -61,6 +66,34 @@ def test_client_registration_and_hmac_flows(client, db_session: Session) -> None
     bad_sig_headers = {**headers, "X-Nonce": "nonce-2", "X-Signature-256": "deadbeef"}
     bad_sig = client.post(path, data=body, headers=bad_sig_headers)
     assert bad_sig.status_code == 401
+
+    rotate = client.post(f"/api/v1/integrations/clients/{client_id}/rotate-secret", headers=admin_headers)
+    assert rotate.status_code == 200
+    rotated_secret = rotate.json()["client_secret"]
+
+    old_nonce = "nonce-old-after-rotate"
+    old_sig = _sign(secret, "POST", path, ts, old_nonce, body)
+    old_headers = {
+        "X-Client-ID": client_id,
+        "X-Signature-256": old_sig,
+        "X-Nonce": old_nonce,
+        "X-Timestamp": ts,
+        "Content-Type": "application/json",
+    }
+    old_attempt = client.post(path, data=body, headers=old_headers)
+    assert old_attempt.status_code == 401
+
+    new_nonce = "nonce-new-after-rotate"
+    new_sig = _sign(rotated_secret, "POST", path, ts, new_nonce, body)
+    new_headers = {
+        "X-Client-ID": client_id,
+        "X-Signature-256": new_sig,
+        "X-Nonce": new_nonce,
+        "X-Timestamp": ts,
+        "Content-Type": "application/json",
+    }
+    new_attempt = client.post(path, data=body, headers=new_headers)
+    assert new_attempt.status_code == 200
 
 
 def test_rate_limit_and_qbank_import(client, db_session: Session) -> None:

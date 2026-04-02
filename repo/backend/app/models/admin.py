@@ -72,3 +72,19 @@ class AuditLog(Base):
     after_hash: Mapped[str] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     metadata_json: Mapped[str] = mapped_column(Text, nullable=True)
+
+
+class AuditLogArchive(Base):
+    __tablename__ = "audit_logs_archive"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    original_audit_id: Mapped[int] = mapped_column(Integer, nullable=False, unique=True, index=True)
+    actor_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    action: Mapped[str] = mapped_column(String(120), nullable=False)
+    entity_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    entity_id: Mapped[int] = mapped_column(Integer, nullable=True)
+    before_hash: Mapped[str] = mapped_column(String(64), nullable=True)
+    after_hash: Mapped[str] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    metadata_json: Mapped[str] = mapped_column(Text, nullable=True)
+    archived_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

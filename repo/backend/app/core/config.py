@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     rate_limit_rpm: int = 120
     hmac_timestamp_tolerance: int = 300
     dedup_threshold: float = 0.92
+    integration_secret_enc_key: str | None = None
+    messaging_poller_enabled: bool = True
+    messaging_poller_interval_seconds: int = 30
 
     web_api_base_url: str = "/api/v1"
 

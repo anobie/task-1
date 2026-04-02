@@ -3,10 +3,11 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
+from app.core.authz import can_access_section, require_section_access
 from app.core.database import get_db
 from app.models.admin import Course, Section
 from app.models.registration import Enrollment, EnrollmentStatus, RegistrationHistory
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.schemas.registration import (
     CourseDetail,
     CourseListItem,
@@ -22,17 +23,27 @@ from app.services import registration_service
 router = APIRouter(tags=["courses-registration"])
 
 
+def _require_student(user: User) -> None:
+    if user.role != UserRole.student:
+        raise HTTPException(status_code=403, detail="Student access required.")
+
+
 @router.get("/courses", response_model=list[CourseListItem])
-def list_courses(db: Session = Depends(get_db)):
+def list_courses(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     rows = db.query(Course).order_by(Course.id.asc()).all()
     result: list[CourseListItem] = []
     for course in rows:
-        sections = db.query(Section).filter(Section.course_id == course.id).all()
+        sections = [section for section in db.query(Section).filter(Section.course_id == course.id).all() if can_access_section(db, user, section.id)]
+        if not sections:
+            continue
         capacity_total = sum(section.capacity for section in sections)
         enrolled = (
             db.query(Enrollment)
             .join(Section, Enrollment.section_id == Section.id)
-            .filter(Section.course_id == course.id, Enrollment.status == EnrollmentStatus.enrolled)
+            .filter(
+                Section.id.in_([section.id for section in sections]),
+                Enrollment.status == EnrollmentStatus.enrolled,
+            )
             .count()
         )
         result.append(
@@ -48,11 +59,13 @@ def list_courses(db: Session = Depends(get_db)):
 
 
 @router.get("/courses/{course_id}", response_model=CourseDetail)
-def get_course(course_id: int, db: Session = Depends(get_db)):
+def get_course(course_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     course = db.query(Course).filter(Course.id == course_id).first()
     if course is None:
         raise HTTPException(status_code=404, detail="Course not found.")
-    sections = db.query(Section).filter(Section.course_id == course.id).all()
+    sections = [section for section in db.query(Section).filter(Section.course_id == course.id).all() if can_access_section(db, user, section.id)]
+    if not sections:
+        raise HTTPException(status_code=403, detail="Access denied for requested course.")
     return CourseDetail(
         id=course.id,
         code=course.code,
@@ -65,6 +78,7 @@ def get_course(course_id: int, db: Session = Depends(get_db)):
 
 @router.get("/courses/{course_id}/sections/{section_id}/eligibility", response_model=EligibilityResponse)
 def eligibility(course_id: int, section_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    require_section_access(db, user, section_id)
     reasons = registration_service.check_eligibility(db, user, course_id, section_id)
     return EligibilityResponse(eligible=len(reasons) == 0, reasons=reasons)
 
@@ -76,14 +90,18 @@ def enroll(
     user: User = Depends(get_current_user),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
+    _require_student(user)
     if not idempotency_key:
         raise HTTPException(status_code=400, detail="Idempotency-Key header is required.")
+    require_section_access(db, user, payload.section_id)
     code, response = registration_service.enroll(db, user, payload.section_id, idempotency_key)
     return JSONResponse(content=response, status_code=code)
 
 
 @router.post("/registration/waitlist")
 def waitlist(payload: WaitlistRequest, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _require_student(user)
+    require_section_access(db, user, payload.section_id)
     return registration_service.join_waitlist(db, user, payload.section_id)
 
 
@@ -94,8 +112,10 @@ def drop(
     user: User = Depends(get_current_user),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
+    _require_student(user)
     if not idempotency_key:
         raise HTTPException(status_code=400, detail="Idempotency-Key header is required.")
+    require_section_access(db, user, payload.section_id)
     code, response = registration_service.drop(db, user, payload.section_id, idempotency_key)
     return JSONResponse(content=response, status_code=code)
 

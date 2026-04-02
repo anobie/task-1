@@ -3,12 +3,25 @@ from sqlalchemy.orm import Session
 
 from app.core.audit import write_audit_log
 from app.core.auth import get_current_user
+from app.core.authz import can_access_student, require_student_access
 from app.core.database import get_db
+from app.core.logging import get_logger
 from app.models.user import User, UserRole
-from app.schemas.finance import AccountSummaryOut, ArrearsItem, LedgerEntryOut, PaymentIn, ReconciliationImportOut, RefundIn
-from app.services import finance_service
+from app.schemas.finance import (
+    AccountSummaryOut,
+    ArrearsItem,
+    DepositIn,
+    LedgerEntryOut,
+    MonthEndBillingIn,
+    PaymentIn,
+    PrepaymentIn,
+    ReconciliationImportOut,
+    RefundIn,
+)
+from app.services import data_quality_service, finance_service
 
 router = APIRouter(prefix="/finance", tags=["finance"])
+logger = get_logger("app.finance")
 
 
 def _ensure_finance_or_admin(user: User) -> None:
@@ -16,9 +29,25 @@ def _ensure_finance_or_admin(user: User) -> None:
         raise HTTPException(status_code=403, detail="Finance clerk or admin access required.")
 
 
+def _enforce_finance_write_quality(entity_type: str, payload: dict, db: Session) -> None:
+    ranges = {"amount": {"min": 0.01, "max": 100000.0}}
+    required_fields = ["student_id", "amount", "entry_date"]
+    if entity_type == "FinanceRefundWrite":
+        required_fields = [*required_fields, "reference_entry_id"]
+    data_quality_service.enforce_write_quality(
+        db,
+        entity_type=entity_type,
+        payload=payload,
+        required_fields=required_fields,
+        ranges=ranges,
+        unique_keys=[],
+    )
+
+
 @router.get("/accounts/{student_id}", response_model=AccountSummaryOut)
 def get_account(student_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     _ensure_finance_or_admin(user)
+    require_student_access(db, user, student_id)
     balance, entries = finance_service.get_account_summary(db, student_id)
     return AccountSummaryOut(
         student_id=student_id,
@@ -42,6 +71,8 @@ def get_account(student_id: int, db: Session = Depends(get_db), user: User = Dep
 @router.post("/payments", response_model=LedgerEntryOut)
 def post_payment(payload: PaymentIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     _ensure_finance_or_admin(user)
+    require_student_access(db, user, payload.student_id)
+    _enforce_finance_write_quality("FinancePaymentWrite", payload.model_dump(), db)
     entry = finance_service.record_payment(
         db,
         student_id=payload.student_id,
@@ -59,6 +90,88 @@ def post_payment(payload: PaymentIn, db: Session = Depends(get_db), user: User =
         before=None,
         after={"id": entry.id, "student_id": entry.student_id, "amount": entry.amount, "entry_type": entry.entry_type.value},
     )
+    logger.info(
+        "finance_payment_recorded",
+        extra={"event": "finance.payment.recorded", "fields": {"entry_id": entry.id, "student_id": entry.student_id, "actor_id": user.id}},
+    )
+    db.commit()
+    return LedgerEntryOut(
+        id=entry.id,
+        entry_type=entry.entry_type.value,
+        amount=entry.amount,
+        instrument=entry.instrument.value if entry.instrument else None,
+        reference_entry_id=entry.reference_entry_id,
+        description=entry.description,
+        entry_date=entry.entry_date,
+        created_at=entry.created_at,
+    )
+
+
+@router.post("/prepayments", response_model=LedgerEntryOut)
+def post_prepayment(payload: PrepaymentIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _ensure_finance_or_admin(user)
+    require_student_access(db, user, payload.student_id)
+    _enforce_finance_write_quality("FinancePrepaymentWrite", payload.model_dump(), db)
+    entry = finance_service.record_prepayment(
+        db,
+        student_id=payload.student_id,
+        amount=payload.amount,
+        instrument=payload.instrument,
+        description=payload.description,
+        entry_date=payload.entry_date,
+    )
+    write_audit_log(
+        db,
+        actor_id=user.id,
+        action="finance.prepayment.record",
+        entity_name="LedgerEntry",
+        entity_id=entry.id,
+        before=None,
+        after={"id": entry.id, "student_id": entry.student_id, "amount": entry.amount, "entry_type": entry.entry_type.value},
+    )
+    logger.info(
+        "finance_prepayment_recorded",
+        extra={"event": "finance.prepayment.recorded", "fields": {"entry_id": entry.id, "student_id": entry.student_id, "actor_id": user.id}},
+    )
+    db.commit()
+    return LedgerEntryOut(
+        id=entry.id,
+        entry_type=entry.entry_type.value,
+        amount=entry.amount,
+        instrument=entry.instrument.value if entry.instrument else None,
+        reference_entry_id=entry.reference_entry_id,
+        description=entry.description,
+        entry_date=entry.entry_date,
+        created_at=entry.created_at,
+    )
+
+
+@router.post("/deposits", response_model=LedgerEntryOut)
+def post_deposit(payload: DepositIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _ensure_finance_or_admin(user)
+    require_student_access(db, user, payload.student_id)
+    _enforce_finance_write_quality("FinanceDepositWrite", payload.model_dump(), db)
+    entry = finance_service.record_deposit(
+        db,
+        student_id=payload.student_id,
+        amount=payload.amount,
+        instrument=payload.instrument,
+        description=payload.description,
+        entry_date=payload.entry_date,
+    )
+    write_audit_log(
+        db,
+        actor_id=user.id,
+        action="finance.deposit.record",
+        entity_name="LedgerEntry",
+        entity_id=entry.id,
+        before=None,
+        after={"id": entry.id, "student_id": entry.student_id, "amount": entry.amount, "entry_type": entry.entry_type.value},
+    )
+    logger.info(
+        "finance_deposit_recorded",
+        extra={"event": "finance.deposit.recorded", "fields": {"entry_id": entry.id, "student_id": entry.student_id, "actor_id": user.id}},
+    )
     db.commit()
     return LedgerEntryOut(
         id=entry.id,
@@ -75,6 +188,8 @@ def post_payment(payload: PaymentIn, db: Session = Depends(get_db), user: User =
 @router.post("/refunds", response_model=LedgerEntryOut)
 def post_refund(payload: RefundIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     _ensure_finance_or_admin(user)
+    require_student_access(db, user, payload.student_id)
+    _enforce_finance_write_quality("FinanceRefundWrite", payload.model_dump(), db)
     entry = finance_service.record_refund(
         db,
         student_id=payload.student_id,
@@ -92,6 +207,48 @@ def post_refund(payload: RefundIn, db: Session = Depends(get_db), user: User = D
         before=None,
         after={"id": entry.id, "student_id": entry.student_id, "amount": entry.amount, "entry_type": entry.entry_type.value},
     )
+    logger.info(
+        "finance_refund_recorded",
+        extra={"event": "finance.refund.recorded", "fields": {"entry_id": entry.id, "student_id": entry.student_id, "actor_id": user.id}},
+    )
+    db.commit()
+    return LedgerEntryOut(
+        id=entry.id,
+        entry_type=entry.entry_type.value,
+        amount=entry.amount,
+        instrument=entry.instrument.value if entry.instrument else None,
+        reference_entry_id=entry.reference_entry_id,
+        description=entry.description,
+        entry_date=entry.entry_date,
+        created_at=entry.created_at,
+    )
+
+
+@router.post("/month-end-billing", response_model=LedgerEntryOut)
+def post_month_end_billing(payload: MonthEndBillingIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    _ensure_finance_or_admin(user)
+    require_student_access(db, user, payload.student_id)
+    _enforce_finance_write_quality("FinanceMonthEndWrite", payload.model_dump(), db)
+    entry = finance_service.record_month_end_billing(
+        db,
+        student_id=payload.student_id,
+        amount=payload.amount,
+        description=payload.description,
+        entry_date=payload.entry_date,
+    )
+    write_audit_log(
+        db,
+        actor_id=user.id,
+        action="finance.month_end_billing.record",
+        entity_name="LedgerEntry",
+        entity_id=entry.id,
+        before=None,
+        after={"id": entry.id, "student_id": entry.student_id, "amount": entry.amount, "entry_type": entry.entry_type.value},
+    )
+    logger.info(
+        "finance_month_end_billing_recorded",
+        extra={"event": "finance.month_end_billing.recorded", "fields": {"entry_id": entry.id, "student_id": entry.student_id, "actor_id": user.id}},
+    )
     db.commit()
     return LedgerEntryOut(
         id=entry.id,
@@ -108,7 +265,20 @@ def post_refund(payload: RefundIn, db: Session = Depends(get_db), user: User = D
 @router.get("/arrears", response_model=list[ArrearsItem])
 def get_arrears(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     _ensure_finance_or_admin(user)
-    rows = finance_service.arrears_with_late_fee(db)
+    rows, generated_late_fees = finance_service.arrears_with_late_fee(db)
+    if user.role != UserRole.admin:
+        rows = [row for row in rows if can_access_student(db, user, row["student_id"])]
+    if generated_late_fees > 0:
+        write_audit_log(
+            db,
+            actor_id=user.id,
+            action="finance.late_fee.generate",
+            entity_name="LedgerEntry",
+            entity_id=None,
+            before=None,
+            after={"generated_late_fees": generated_late_fees},
+        )
+        db.commit()
     return [ArrearsItem(**row) for row in rows]
 
 
@@ -117,9 +287,11 @@ async def import_reconciliation(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
-):
+): 
     _ensure_finance_or_admin(user)
-    if not file.filename.lower().endswith(".csv"):
+    filename = str(file.filename or "")
+    if not filename.lower().endswith(".csv"):
+        logger.info("finance_reconciliation_invalid_file", extra={"event": "finance.reconciliation.invalid_file"})
         raise HTTPException(status_code=422, detail="Only CSV files are supported.")
     content = await file.read()
     report = finance_service.import_reconciliation_csv(db, content.decode("utf-8"))
@@ -131,6 +303,13 @@ async def import_reconciliation(
         entity_id=report.id,
         before=None,
         after={"import_id": report.import_id, "matched_total": report.matched_total, "unmatched_total": report.unmatched_total},
+    )
+    logger.info(
+        "finance_reconciliation_imported",
+        extra={
+            "event": "finance.reconciliation.imported",
+            "fields": {"import_id": report.import_id, "actor_id": user.id, "matched_total": report.matched_total},
+        },
     )
     db.commit()
     return ReconciliationImportOut(
