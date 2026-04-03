@@ -1,6 +1,6 @@
 """messaging trigger scheduler
 
-Revision ID: 0012_messaging_triggers_scheduler
+Revision ID: 0012_msg_triggers_scheduler
 Revises: 0011_audit_log_archive
 Create Date: 2026-04-02 22:30:00
 """
@@ -8,7 +8,7 @@ Create Date: 2026-04-02 22:30:00
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0012_messaging_triggers_scheduler"
+revision = "0012_msg_triggers_scheduler"
 down_revision = "0011_audit_log_archive"
 branch_labels = None
 depends_on = None
