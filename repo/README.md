@@ -6,18 +6,16 @@
 - `web`: React + MUI frontend (`http://localhost:5173`)
 
 ## Quick Start (Docker)
-1. Copy `.env.example` to `.env` if needed.
-2. Ensure required env vars are set:
-   - `DATABASE_URL`
-   - `SECRET_KEY`
-   - Optional (recommended): `INTEGRATION_SECRET_ENC_KEY`
-3. Build and start services:
+1. Optional: copy `.env.example` to `.env` for local overrides.
+2. Build and start services:
    - `docker compose up --build -d`
-4. Check API health:
+3. Check API health:
    - `http://localhost:8000/api/v1/health/live`
    - `http://localhost:8000/api/v1/health/ready`
-5. Open frontend:
+4. Open frontend:
    - `http://localhost:5173`
+
+Docker compose includes safe defaults for required backend settings; CI can override any value using environment variables.
 
 ## Local Setup (No Docker)
 - Backend prerequisites:

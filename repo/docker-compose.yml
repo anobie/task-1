@@ -22,8 +22,23 @@ services:
       context: ./backend
     container_name: cems_api
     restart: unless-stopped
-    env_file:
-      - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://cems:cems@db:5432/cems}
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-12}
+      SESSION_IDLE_TIMEOUT: ${SESSION_IDLE_TIMEOUT:-28800}
+      SESSION_ABSOLUTE_TIMEOUT: ${SESSION_ABSOLUTE_TIMEOUT:-86400}
+      LATE_FEE_RATE: ${LATE_FEE_RATE:-0.015}
+      GRACE_PERIOD_DAYS: ${GRACE_PERIOD_DAYS:-10}
+      RATE_LIMIT_RPM: ${RATE_LIMIT_RPM:-120}
+      HMAC_TIMESTAMP_TOLERANCE: ${HMAC_TIMESTAMP_TOLERANCE:-300}
+      DEDUP_THRESHOLD: ${DEDUP_THRESHOLD:-0.92}
+      API_HOST: ${API_HOST:-0.0.0.0}
+      API_PORT: ${API_PORT:-8000}
+      WEB_API_BASE_URL: ${WEB_API_BASE_URL:-/api/v1}
+      MESSAGING_POLLER_ENABLED: ${MESSAGING_POLLER_ENABLED:-true}
+      MESSAGING_POLLER_INTERVAL_SECONDS: ${MESSAGING_POLLER_INTERVAL_SECONDS:-30}
+      INTEGRATION_SECRET_ENC_KEY: ${INTEGRATION_SECRET_ENC_KEY:-}
     depends_on:
       db:
         condition: service_healthy
